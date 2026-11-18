@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { emptyNote, emptyItem, type DeliveryNote, type LineItem, type Party } from "@/lib/types";
 import { lineAmount, totalAmount, amountInChinese } from "@/lib/calc";
 import { loadNotes, upsertNote, deleteNote } from "@/lib/storage";
+import { validateNote, missingAfterAi } from "@/lib/validate";
 import type { AiParseResult } from "@/lib/ai";
 
 export default function Home() {
@@ -12,6 +13,7 @@ export default function Home() {
   const [aiText, setAiText] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiMsg, setAiMsg] = useState<string | null>(null);
+  const [showErrors, setShowErrors] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,6 +28,14 @@ export default function Home() {
 
   const total = useMemo(() => totalAmount(note.items), [note.items]);
   const chinese = useMemo(() => amountInChinese(total), [total]);
+  const issues = useMemo(() => validateNote(note), [note]);
+  const issueMap = useMemo(() => {
+    const map = new Map<string, string>();
+    issues.forEach((issue) => {
+      if (!map.has(issue.path)) map.set(issue.path, issue.message);
+    });
+    return map;
+  }, [issues]);
 
   function updateNote(patch: Partial<DeliveryNote>) {
     setNote((prev) => ({ ...prev, ...patch }));
@@ -62,16 +72,22 @@ export default function Home() {
       quantity: Number(it.quantity) || 0,
       price: Number(it.price) || 0,
     }));
-    setNote((prev) => ({
-      ...prev,
-      no: n.no || prev.no,
-      date: n.date || prev.date,
-      sender: { ...prev.sender, ...sender },
-      receiver: { ...prev.receiver, ...receiver },
-      items: items.length ? items : prev.items,
-      remark: n.remark ?? prev.remark,
-    }));
-    if (parsed.warning) setAiMsg(`已解析，注意：${parsed.warning}`);
+    const next: DeliveryNote = {
+      ...note,
+      no: n.no || note.no,
+      date: n.date || note.date,
+      sender: { ...note.sender, ...sender },
+      receiver: { ...note.receiver, ...receiver },
+      items: items.length ? items : note.items,
+      remark: n.remark ?? note.remark,
+    };
+    setNote(next);
+    const missing = missingAfterAi(next);
+    const parts = ["已自动填入表单，请核对后保存。"];
+    if (missing.length) parts.push(`AI 未提供的字段：${missing.join("、")}，已在表单中标出，请手动补充。`);
+    if (parsed.warning) parts.push(`注意：${parsed.warning}`);
+    setAiMsg(parts.join(" "));
+    setShowErrors(true);
   }
 
   async function runAiParse() {
@@ -97,7 +113,6 @@ export default function Home() {
         return;
       }
       applyAiParsed(data);
-      setAiMsg("已自动填入表单，请核对后保存。");
     } catch {
       setAiMsg("网络错误，请稍后重试。");
     } finally {
@@ -106,6 +121,11 @@ export default function Home() {
   }
 
   function handleSave() {
+    if (issues.length) {
+      setShowErrors(true);
+      setAiMsg(`还有 ${issues.length} 项需要修正：${issues.slice(0, 3).map((item) => item.message).join("；")}${issues.length > 3 ? " 等" : ""}`);
+      return;
+    }
     const cleaned: DeliveryNote = {
       ...note,
       items: note.items.filter((it) => it.name.trim() || it.quantity || it.price),
@@ -117,6 +137,7 @@ export default function Home() {
     const next = upsertNote(cleaned);
     setHistory(next);
     setNote({ ...cleaned, id: crypto.randomUUID(), no: nextNo() });
+    setShowErrors(false);
     setToast("已保存到本地历史");
   }
 
@@ -124,6 +145,7 @@ export default function Home() {
     setNote(emptyNote());
     setAiText("");
     setAiMsg(null);
+    setShowErrors(false);
   }
 
   function handleLoad(id: string) {
@@ -136,6 +158,8 @@ export default function Home() {
     setHistory(deleteNote(id));
     setToast("已删除");
   }
+
+  const visibleErrors = showErrors ? issueMap : new Map<string, string>();
 
   return (
     <div className="app">
@@ -156,6 +180,12 @@ export default function Home() {
 
       <div className="layout">
         <main className="main">
+          {showErrors && issues.length > 0 && (
+            <div className="issue-banner">
+              <strong>还有 {issues.length} 项未通过校验</strong>
+              <span>{issues[0].message}{issues.length > 1 ? `，等共 ${issues.length} 项` : ""}</span>
+            </div>
+          )}
           <section className="card ai-card">
             <div className="card-title">
               <span className="kicker">AI 解析</span>
@@ -183,17 +213,17 @@ export default function Home() {
               <h2>基础信息</h2>
             </div>
             <div className="grid-2">
-              <Field label="单据编号">
+              <Field label="单据编号" error={visibleErrors.get("no")}>
                 <input value={note.no} onChange={(e) => updateNote({ no: e.target.value })} />
               </Field>
-              <Field label="送货日期">
+              <Field label="送货日期" error={visibleErrors.get("date")}>
                 <input type="date" value={note.date} onChange={(e) => updateNote({ date: e.target.value })} />
               </Field>
             </div>
 
             <div className="grid-2">
-              <PartyBlock title="发货方" party={note.sender} onChange={(p) => updateParty("sender", p)} />
-              <PartyBlock title="收货方" party={note.receiver} onChange={(p) => updateParty("receiver", p)} />
+              <PartyBlock title="发货方" prefix="sender" errors={visibleErrors} party={note.sender} onChange={(p) => updateParty("sender", p)} />
+              <PartyBlock title="收货方" prefix="receiver" errors={visibleErrors} party={note.receiver} onChange={(p) => updateParty("receiver", p)} />
             </div>
           </section>
 
@@ -213,13 +243,13 @@ export default function Home() {
                 <span className="num">金额</span>
                 <span></span>
               </div>
-              {note.items.map((it) => (
+              {note.items.map((it, index) => (
                 <div className="items-row" key={it.id}>
-                  <input value={it.name} onChange={(e) => updateItem(it.id, { name: e.target.value })} placeholder="名称" />
+                  <input className={visibleErrors.get(`items.${index}.name`) ? "invalid" : ""} value={it.name} onChange={(e) => updateItem(it.id, { name: e.target.value })} placeholder="名称" />
                   <input value={it.spec} onChange={(e) => updateItem(it.id, { spec: e.target.value })} placeholder="规格" />
                   <input value={it.unit} onChange={(e) => updateItem(it.id, { unit: e.target.value })} placeholder="件" className="unit" />
-                  <input type="number" min="0" value={it.quantity} onChange={(e) => updateItem(it.id, { quantity: Number(e.target.value) })} className="num" />
-                  <input type="number" min="0" step="0.01" value={it.price} onChange={(e) => updateItem(it.id, { price: Number(e.target.value) })} className="num" />
+                  <input type="number" min="0" value={it.quantity} onChange={(e) => updateItem(it.id, { quantity: Number(e.target.value) })} className={`num${visibleErrors.get(`items.${index}.quantity`) ? " invalid" : ""}`} />
+                  <input type="number" min="0" step="0.01" value={it.price} onChange={(e) => updateItem(it.id, { price: Number(e.target.value) })} className={`num${visibleErrors.get(`items.${index}.price`) ? " invalid" : ""}`} />
                   <span className="num amount">¥{lineAmount(it).toFixed(2)}</span>
                   <button className="icon-btn" onClick={() => removeItem(it.id)} aria-label="删除">×</button>
                 </div>
@@ -279,22 +309,35 @@ export default function Home() {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, error }: { label: string; children: React.ReactNode; error?: string }) {
   return (
-    <label className="field">
+    <label className={`field${error ? " invalid" : ""}`}>
       <span>{label}</span>
       {children}
+      {error && <small className="field-error">{error}</small>}
     </label>
   );
 }
 
-function PartyBlock({ title, party, onChange }: { title: string; party: Party; onChange: (p: Partial<Party>) => void }) {
+function PartyBlock({
+  title,
+  prefix,
+  errors,
+  party,
+  onChange,
+}: {
+  title: string;
+  prefix: "sender" | "receiver";
+  errors: Map<string, string>;
+  party: Party;
+  onChange: (p: Partial<Party>) => void;
+}) {
   return (
     <div className="party">
       <h3>{title}</h3>
-      <Field label="名称"><input value={party.name} onChange={(e) => onChange({ name: e.target.value })} /></Field>
+      <Field label="名称" error={errors.get(`${prefix}.name`)}><input value={party.name} onChange={(e) => onChange({ name: e.target.value })} /></Field>
       <Field label="联系人"><input value={party.contact} onChange={(e) => onChange({ contact: e.target.value })} /></Field>
-      <Field label="电话"><input value={party.phone} onChange={(e) => onChange({ phone: e.target.value })} /></Field>
+      <Field label="电话" error={errors.get(`${prefix}.phone`)}><input value={party.phone} onChange={(e) => onChange({ phone: e.target.value })} inputMode="tel" /></Field>
       <Field label="地址"><input value={party.address} onChange={(e) => onChange({ address: e.target.value })} /></Field>
     </div>
   );

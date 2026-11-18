@@ -126,3 +126,22 @@ button { font: inherit; cursor: pointer; }
   .note-paper { box-shadow: none; border: none; padding: 0; }
   body { background: #fff; }
 }
+
+/* ===== 校验状态 ===== */
+.issue-banner {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  background: #fff4ef;
+  border: 1px solid #ecc4b5;
+  border-left: 4px solid #c85e3d;
+  color: #8a3a22;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.issue-banner strong { white-space: nowrap; }
+.field.invalid input,
+input.invalid { border-color: #c85e3d; background: #fff8f5; }
+.field-error { color: #c85e3d; font-size: 11px; margin-top: 3px; line-height: 1.4; }
+@media print { .issue-banner, .field-error { display: none; } }
